@@ -1,0 +1,190 @@
+data路径：
+OHTS：
+/home/lin01231/public/datasets/image_crop2
+AREDS:
+/home/lin01231/public/datasets/AMD_224
+
+code路径：
+/home/lin01231/public/code
+
+Code modification
+VisionFM
+you can find VisionFM pretrained weights in     pretrained_weights/VFM_Fundus_weights.pth
+
+you can find conda env names lsta.yaml(not ltsa.yml)
+
+1:models_long.py: added VFM_image and VFM_LTSA in create_model function
+2:models_vfm.py: added VFMImageSurvivalModel and VFM_LTSA classes
+main modification is here: replace cnn encoder with vit from VFM
+
+class VFMImageSurvivalModel(nn.Module):
+    """
+    Single-image survival model using VisionFM as the encoder.
+    This is a direct replacement for the ImageSurvivalModel class but using VFM's ViT.
+    """
+    def __init__(self, args):
+        super(VFMImageSurvivalModel, self).__init__()
+        
+        # Initialize VFM encoder with specified patch size and no classification head
+        self.encoder = vit_base(patch_size=args.vfm_patch_size, num_classes=0)
+        
+        # Load pretrained weights
+        load_pretrained_weights(
+            model=self.encoder,
+            pretrained_weights=args.vfm_checkpoint_path,
+            checkpoint_key=args.vfm_checkpoint_key,
+            model_name='vit_base',
+            patch_size=args.vfm_patch_size
+        )
+        
+        # Freeze encoder parameters if specified
+        if getattr(args, 'freeze_encoder', True):
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+                
+        # Define classifier head for survival prediction
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=args.dropout),
+            nn.Linear(self.encoder.embed_dim, args.n_classes),
+            nn.Sigmoid()
+        )
+
+3:utils.py: please look into line972, mainly about load pretrained weight from VisionFM
+4:train.py: add args for VFM
+
+dataset
+I can not modify the original sigf dataset so that I create SIGF_processed dataset in public/datasets/SIGF_processed: this data doesn't have image that label 1
+All csv files are generated from SIGF_processed dataset
+you can find code to process and generate csv for sigf data in src/SIGFpreprocess
+
+
+the logic of sigf csv
+CSV Field Definitions and Data Extraction Process
+Field Descriptions
+ID (Patient Identifier)
+
+Meaning: Unique patient identifier extracted from image filenames
+How obtained: Parsed from image filename using regex pattern SD(\d+)_(\d{4}_\d{2}_\d{2})_([OD|OS]+)$
+Example: From filename "SD1284_1990_04_11_OS.JPG", extracts "SD1284"
+
+LR (Laterality - Eye Designation)
+
+Meaning: Specifies which eye is being analyzed (OD = Right Eye, OS = Left Eye)
+How obtained: Extracted from the same filename parsing process
+Values: "OD" (oculus dexter) or "OS" (oculus sinister)
+
+glaucoma (Disease Status)
+
+Meaning: Indicates presence of glaucoma progression at the time of image capture
+How obtained: Always set to 0 in this dataset because post-progression images have been removed during preprocessing
+Values: Always 0 (pre-progression state)
+
+year (Temporal Index)
+
+Meaning: Sequential index representing the chronological order of images for each patient-eye combination
+How obtained: Images are sorted by date extracted from filename, then assigned indices starting from 0
+Values: 0, 1, 2, ... (representing 1st image, 2nd image, etc.)
+
+time_to_event (Total Follow-up Duration)
+
+Meaning: Total number of images available for this specific patient-eye combination
+How obtained: Counted after filtering images with consecutive label=0 (pre-progression)
+Values: Integer representing sequence length (≤14 due to filtering)
+
+censorship (Survival Analysis Indicator)
+
+Meaning: Indicates whether the patient experienced the event (glaucoma progression) during follow-up
+How obtained:
+
+Set to 0 if any label=1 exists in the original label file (event occurred)
+Set to 1 if all labels=0 (patient was censored/no progression observed)
+
+
+Values: 0 = event occurred, 1 = censored (standard survival analysis convention)
+
+Data Extraction Workflow
+
+Image Processing: Images are sorted chronologically by date extracted from filenames
+Label Alignment: Only images corresponding to consecutive label=0 are retained
+Sequence Filtering: Patient-eye combinations with >14 images are excluded entirely
+Survival Data Generation: Each image becomes a row with its temporal index and survival metadata
+
+
+执行的命令：
+baseline
+python train.py --results_dir results --dataset OHTS --model image --dropout 0.25 --augment --reduce_lr --batch_size 64
+LSTA
+python train.py --results_dir results --dataset OHTS --model LTSA --dropout 0.25 --augment --reduce_lr --batch_size 32 --tpe --step_ahead
+SF
+python train.py --results_dir results --dataset OHTS --model SF --dropout 0.25 --augment --reduce_lr --batch_size 32 --tpe --step_ahead --use_deformable_spatial --use_deformable_temporal
+VFM
+python train.py --results_dir results --dataset OHTS --model VFM_image --dropout 0.25 --augment --reduce_lr --batch_size 64 --vfm_checkpoint_path 
+
+  SIGF训练命令
+
+  Baseline (Single Image):
+  python train.py --results_dir results --dataset SIGF --model image --dropout 0.25 --augment --reduce_lr --batch_size 64
+
+  LTSA (Longitudinal Transformer):
+  python train.py --results_dir results --dataset SIGF --model LTSA --dropout 0.25 --augment --reduce_lr --batch_size 32 --tpe --step_ahead
+
+  SF (Survival Forecasting):
+  python train.py --results_dir results --dataset SIGF --model SF --dropout 0.25 --augment --reduce_lr --batch_size 32 --tpe --step_ahead --use_deformable_spatial --use_deformable_temporal
+
+OHTS inference SIGF 命令(inferences.py就是ohts训练好的权重直接给sigf做测试看效果的)
+1. Baseline模型推理
+
+  python inference.py --model image --weight_path
+  "/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/src/results/surv_
+  OHTS_image_50-ep_deform-spatial_deform-temporal/best.pt" --results_dir results --dropout 0.25
+  --batch_size 64
+
+  2. LTSA模型推理
+
+python inference.py --model LTSA --weight_path "/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/src/results/surv_OHTS_LTSA_step-ahead_50-ep_deform-spatial_deform-temporal/best.pt" --results_dir results --dropout 0.25 --batch_size 32 --tpe --step_ahead
+
+  3. SF模型推理
+
+python inference.py --model SF --weight_path "/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/src/results/surv_OHTS_SF_step-ahead_50-ep_deform-spatial_deform-temporal/best.pt" --results_dir results --dropout 0.25 --batch_size 32 --tpe --step_ahead --use_deformable_spatial --use_deformable_temporal
+
+  运行前确保：
+
+  1. 当前目录是：cd 
+  /home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/src
+  2. 权重文件存在（可以用 ls -la results/surv_OHTS_*/best.pt 检查）
+
+  每个命令会在 results/val/ 目录下创建对应的结果文件夹。
+
+
+涉及到的论文：
+Harnessing the power of longitudinal medical imaging for eye disease prognosis using Transformer-based sequence modeling
+
+Deformable DETR: Deformable Transformers for End-to-End Object Detection
+
+需要做的实验：
+Main Results
+
+OHTS和AREDS上分别
+baseline model (args.model=image)
+LTSA(args.model=LTSA)
+TimesFormer (args.model=SF, args.use_deformable_spatial =False, args.use_deformable_temporal =False)
+Ours (args.model=SF, args.use_deformable_spatial =True, args.use_deformable_temporal =True)
+
+bootstrapped分析，做类似林老师工作的图4可视化
+
+Ablation Study
+1.Efficient
+TimesFormer (args.model=SF, args.use_deformable_spatial =False, args.use_deformable_temporal =False)
+Ours (args.model=SF, args.use_deformable_spatial =False)args.use_deformable_temporal =True)
+Ours (args.model=SF, args.use_deformable_spatial =True, args.use_deformable_temporal =False)
+Ours (args.model=SF, args.use_deformable_spatial =True, args.use_deformable_temporal =True)
+这四个方法的精度，参数量，训练时间
+
+2.Deformable n_token的变化对模型的影响
+Space:2/4/6/8/10
+Time:2/4/6/8/10
+这十个的训练时间，参数量，精度
+
+3.参考林老师工作的图5/6 进行数据集分析可视化
+
+4.OHTS和AREDS数据量的统计（参考那个表）
