@@ -14,14 +14,13 @@ import importlib.util
 import sys
 
 # 强制从当前目录加载 datasets.py
-spec = importlib.util.spec_from_file_location("datasets", "/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/src/datasets.py")
+spec = importlib.util.spec_from_file_location("datasets", "/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/src/datasets.py")
 datasets = importlib.util.module_from_spec(spec)
 sys.modules["datasets"] = datasets
 spec.loader.exec_module(datasets)
 
 AREDS_Longitudinal_Survival_Dataset = datasets.AREDS_Longitudinal_Survival_Dataset
 OHTS_Longitudinal_Survival_Dataset = datasets.OHTS_Longitudinal_Survival_Dataset
-SIGF_Longitudinal_Survival_Dataset = datasets.SIGF_Longitudinal_Survival_Dataset
 
 def overlay_attention_on_fundus(fundus_tensor, attention_map, save_path, alpha=0.5):
     fundus = transforms.ToPILImage()(fundus_tensor.cpu()).convert("RGB").resize((224, 224))
@@ -41,23 +40,17 @@ def test_attention_visualization(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.dataset == 'AREDS':
-        args.data_dir = '/home/lin01231/public/datasets/AMD_224/AMD_224'
-        args.label_dir = '/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/AREDS'
+        args.data_dir = '/projects/standard/lin01231/public/datasets/AMD_224/AMD_224'
+        args.label_dir = '/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/AREDS'
         dataset = AREDS_Longitudinal_Survival_Dataset
         from train import AREDS_collate_fn_sf as collate_fn
         args.n_classes = 27
-    elif args.dataset == 'OHTS':
-        args.data_dir = '/home/lin01231/public/datasets/image_crop2/image_crop2'
-        args.label_dir = '/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/OHTS'
+    else:
+        args.data_dir = '/projects/standard/lin01231/public/datasets/image_crop2/image_crop2'
+        args.label_dir = '/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/OHTS'
         dataset = OHTS_Longitudinal_Survival_Dataset
         from train import OHTS_collate_fn_sf as collate_fn
         args.n_classes = 15
-    elif args.dataset == 'SIGF':
-        args.data_dir = '/home/lin01231/public/datasets/SIGF_processed'
-        args.label_dir = '/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/datasets/SIGF_processed'
-        dataset = SIGF_Longitudinal_Survival_Dataset
-        from train import SIGF_collate_fn_sf as collate_fn
-        args.n_classes = 15 # Max time_to_event = 14, so need 0-14 = 15 classes
 
     # Create model
     if args.model == 'SF':
@@ -116,15 +109,34 @@ def test_attention_visualization(args):
                 elif args.attn_mode == 'temporal':
                     encoded = model.encoder(x, seq_lengths)
                     encoded = model.pos_encoder(encoded, rel_times)
+
                     if model.temporal_encoder:
-                        out = model.temporal_encoder(encoded)
-                        attn_map = out.norm(dim=2)[0]
+                        out, attn_weight = model.temporal_encoder(encoded, return_attn=True)
+                        attn_map = attn_weight.max(dim=2)[0].mean(dim=[2, 3])[0] # shape: [T]
+                        
+                        # ===== 修正：直接使用 seq_lengths[0] =====
+                        seq_len = seq_lengths[0]  # 已经是 int 类型,无需 .item()
+                        attn_map = attn_map[:seq_len]  # 截取有效部分
+                        # ========================================
+                        
                         attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
-                        img = x[0, T // 2]  # 中间帧
-                        valid_idx = min(T // 2, len(batch['patient_id']) - 1,len(batch['laterality']) - 1)
+                        valid_idx = min(T // 2, len(batch['patient_id']) - 1, len(batch['laterality']) - 1)
                         fname = f"{batch['patient_id'][valid_idx]}_{batch['laterality'][valid_idx]}_temporal_attn.png"
                         save_path = os.path.join(args.output_dir, fname)
-                        overlay_attention_on_fundus(img, attn_map.cpu().numpy(), save_path)
+                        
+                        attn_map_np = attn_map.cpu().numpy()
+
+                        plt.figure(figsize=(10, 3))
+                        plt.imshow(attn_map_np[np.newaxis, :], aspect='auto', cmap='inferno', interpolation='nearest')
+                        plt.colorbar(label='Attention Score')
+                        plt.title(f"Temporal Attention (seq_len={seq_len})")
+                        plt.xlabel("Time Step")
+                        plt.xlim(-0.5, seq_len - 0.5)  # 设置x轴范围
+                        plt.yticks([])
+                        plt.tight_layout()
+                        plt.savefig(save_path)
+                        plt.close()
+
 
             elif args.model == 'LTSA':
                 output = model(x.reshape(-1, 3, 224, 224), seq_lengths, rel_times, prior_AMD_sevs)
@@ -149,19 +161,19 @@ def test_attention_visualization(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='/home/lin01231/public/datasets/AMD_224/AMD_224')
+    parser.add_argument('--data_dir', type=str, default='/projects/standard/lin01231/public/datasets/AMD_224/AMD_224')
     parser.add_argument('--label_dir', type=str, default='/prj0129/grh4006/AREDS/labels')
-    parser.add_argument('--dataset', type=str, default='AREDS', choices=['AREDS', 'OHTS', 'SIGF'])
-    parser.add_argument('--model_weights', type=str, default='/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/src/results/surv_AREDS_SF_step-ahead_50-ep_deform-spatial_deform-temporal/best.pt')
+    parser.add_argument('--dataset', type=str, default='OHTS', choices=['AREDS', 'OHTS'])
+    parser.add_argument('--model_weights', type=str, default='/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/src/results/surv_OHTS_SF_step-ahead_50-ep_deform-spatial_deform-temporal_nps-10_npt-8/best.pt')
     parser.add_argument('--output_dir', type=str, default='results/attn_viz')
     parser.add_argument('--model', type=str, default='SF', choices=['SF', 'LTSA'])
-    parser.add_argument('--attn_mode', type=str, default='spatial', choices=['spatial', 'temporal'])
+    parser.add_argument('--attn_mode', type=str, default='temporal', choices=['spatial', 'temporal'])
     parser.add_argument('--use_deformable_spatial', action='store_true',default=True )
     parser.add_argument('--use_deformable_temporal', action='store_true',default=True)
     parser.add_argument('--tpe_mode', type=str, default='months')
     parser.add_argument('--learned_pe', action='store_true')
-    parser.add_argument('--num_samples', type=int, default=10)
-    parser.add_argument('--attn_map', action='store_true')
+    parser.add_argument('--num_samples', type=int, default=20)
+    parser.add_argument('--attn_map', action='store_true',default=True)
     parser.add_argument('--step_ahead', action='store_true')
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--dropout', type=float, default=0.1)

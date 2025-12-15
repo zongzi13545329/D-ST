@@ -1,10 +1,5 @@
 import os
-import sys
 import shutil
-
-# Add project root to path to allow absolute imports
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_root)
 
 import argparse
 import numpy as np
@@ -12,16 +7,11 @@ import pandas as pd
 import torch
 import time
 
-from src.datasets import (
-    AREDS_Survival_Dataset, OHTS_Survival_Dataset, SIGF_Survival_Dataset,
-    AREDS_Longitudinal_Survival_Dataset, OHTS_Longitudinal_Survival_Dataset, SIGF_Longitudinal_Survival_Dataset,
-    VFM_AREDS_Survival_Dataset, VFM_OHTS_Survival_Dataset, VFM_SIGF_Survival_Dataset,
-    VFM_AREDS_Longitudinal_Survival_Dataset, VFM_OHTS_Longitudinal_Survival_Dataset, VFM_SIGF_Longitudinal_Survival_Dataset
-)
-from src.utils import set_seed, worker_init_fn, val_worker_init_fn, train, validate, evaluate, train_LTSA, validate_LTSA, evaluate_LTSA
-from src.losses import CrossEntropySurvLoss, NLLSurvLoss, CoxSurvLoss
-from src.models_long import create_model
-from src.models_sf import create_model as sf_create_model
+from datasets import AREDS_Survival_Dataset, OHTS_Survival_Dataset, AREDS_Longitudinal_Survival_Dataset, OHTS_Longitudinal_Survival_Dataset
+from utils import set_seed, worker_init_fn, val_worker_init_fn, train, validate, evaluate, train_LTSA, validate_LTSA, evaluate_LTSA
+from losses import CrossEntropySurvLoss, NLLSurvLoss, CoxSurvLoss
+from models_long import create_model
+from models_sf import create_model as sf_create_model
 
 def AREDS_collate_fn(data):
     x = torch.stack([d['x'] for d in data], dim=0).reshape(-1, 3, 224, 224)  # batch*seq_length x 3 x 224 x 224
@@ -118,78 +108,11 @@ def OHTS_collate_fn_sf(data):
         'laterality': laterality
     }
 
-def SIGF_collate_fn(data):
-    # x, y, censorship, rel_time, and obs_time are pre-padded in the Dataset.
-    # We just need to stack them.
-    x = torch.stack([d['x'] for d in data], dim=0).reshape(-1, 3, 224, 224)  # batch*max_seq_len x 3 x 224 x 224
-    y = torch.stack([d['y'] for d in data], dim=0)  # batch x max_seq_len
-    censorship = torch.stack([d['censorship'] for d in data], dim=0)  # batch x max_seq_len
-
-    rel_time = torch.stack([d['rel_time'] for d in data], dim=0)  # batch x max_seq_len
-    prior_AMD_sev = None  # SIGF doesn't have AMD severity data (like OHTS)
-    obs_time = torch.stack([d['obs_time'] for d in data], dim=0)  # batch x max_seq_len
-
-    # These are not padded, handle them as before
-    fname = np.concatenate([d['fname'] for d in data])
-    patient_id = np.concatenate([d['patient_id'] for d in data])
-    laterality = np.concatenate([d['laterality'] for d in data])
-    event_time = np.concatenate([d['event_time'] for d in data])
-
-    seq_length = [d['seq_length'] for d in data]  # batch
-
-    return {'x': x, 'y': y, 'censorship': censorship, 'event_time': event_time, 'obs_time': obs_time, 'fname': fname, 'seq_length': seq_length, 'rel_time': rel_time, 'prior_AMD_sev': prior_AMD_sev, 'patient_id': patient_id, 'laterality': laterality}
-
-def SIGF_collate_fn_sf(data):
-    # Get the maximum sequence length in this batch  
-    max_seq_len = max([d['x'].shape[0] for d in data])
-    
-    # Pad all sequences to the same length and stack
-    x_padded = []
-    for d in data:
-        x_seq = d['x']  # (seq_len, 3, 224, 224)
-        if x_seq.shape[0] < max_seq_len:
-            # Pad with zeros to max_seq_len
-            pad_len = max_seq_len - x_seq.shape[0]
-            x_padded_seq = torch.cat([x_seq, torch.zeros(pad_len, 3, 224, 224)], dim=0)
-        else:
-            x_padded_seq = x_seq
-        x_padded.append(x_padded_seq)
-    
-    # Keep temporal structure: x is (B, T, C, H, W)
-    x = torch.stack(x_padded, dim=0)  # (B, T, C, H, W)
-    y = torch.stack([d['y'] for d in data], dim=0)  # (B, T)
-    censorship = torch.stack([d['censorship'] for d in data], dim=0)  # (B, T)
-    rel_time = torch.stack([d['rel_time'] for d in data], dim=0)  # (B, T)
-    obs_time = torch.stack([d['obs_time'] for d in data], dim=0)  # (B, T)
-
-    prior_AMD_sev = [d['prior_AMD_sev'] for d in data]  # Keep as None list for SIGF
-    fname = np.concatenate([d['fname'] for d in data])  # sum(B*T)
-    patient_id = np.concatenate([d['patient_id'] for d in data])  # sum(B*T)
-    laterality = np.concatenate([d['laterality'] for d in data])  # sum(B*T)
-    event_time = np.concatenate([d['event_time'] for d in data])  # sum(B*T)
-
-    seq_length = [d['seq_length'] for d in data]  # (B,)
-
-    return {
-        'x': x,  # (B, T, C, H, W) for Timesformer
-        'y': y,  # (B, T)
-        'censorship': censorship,
-        'event_time': event_time,
-        'obs_time': obs_time,
-        'fname': fname,
-        'seq_length': seq_length,
-        'rel_time': rel_time,
-        'prior_AMD_sev': prior_AMD_sev,
-        'patient_id': patient_id,
-        'laterality': laterality
-    }
-
 def count_parameters(model):
     """
     Count the total number of trainable parameters in a model.
     """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 
 def main(args):
     # Set detailed model name
@@ -217,9 +140,6 @@ def main(args):
     MODEL_NAME += f'_seed-{args.seed}' if args.seed != 0 else ''
     MODEL_NAME += '_deform-spatial' if args.use_deformable_spatial else '_no-deform-spatial'
     MODEL_NAME += '_deform-temporal' if args.use_deformable_temporal else '_no-deform-temporal'
-    # Add VFM-specific naming components if using a VFM model
-    if args.model in ['VFM_image', 'VFM_LTSA']:
-        MODEL_NAME += f'_vfm-{args.vfm_patch_size}'
 
     # Create result directory and model directory
     if not os.path.isdir(args.results_dir):
@@ -242,64 +162,32 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.dataset == 'AREDS':
-        args.data_dir = '/home/lin01231/public/datasets/AMD_224/AMD_224'
-        args.label_dir = '/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/AREDS'
+        args.data_dir = '/projects/standard/lin01231/public/datasets/AMD_224/AMD_224'
+        args.label_dir = '/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/AREDS'
         args.n_classes = 27  # 6-month intervals for 13 years
 
         if args.model == 'LTSA':
             dataset = AREDS_Longitudinal_Survival_Dataset
             collate_fn = AREDS_collate_fn
-        elif args.model == 'VFM_LTSA':  # Added VFM_LTSA option
-            dataset = VFM_AREDS_Longitudinal_Survival_Dataset
-            collate_fn = AREDS_collate_fn
         elif args.model == 'SF':
             dataset = AREDS_Longitudinal_Survival_Dataset
             collate_fn = AREDS_collate_fn_sf
-        elif args.model == 'VFM_image':
-            dataset = VFM_AREDS_Survival_Dataset
-            collate_fn = None
-        else:  # 'image'
+        else:
             dataset = AREDS_Survival_Dataset
             collate_fn = None
     elif args.dataset == 'OHTS':
-        args.data_dir = '/home/lin01231/public/datasets/image_crop2/image_crop2'
-        args.label_dir = '/home/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/OHTS'
+        args.data_dir = '/projects/standard/lin01231/public/datasets/image_crop2/image_crop2'
+        args.label_dir = '/projects/standard/lin01231/song0760/longitudinal_transformer_for_survival_analysis/datasets/OHTS'
         args.n_classes = 15  # 1-year intervals for 14 years
 
         if args.model == 'LTSA':
             dataset = OHTS_Longitudinal_Survival_Dataset
             collate_fn = OHTS_collate_fn
-        elif args.model == 'VFM_LTSA':  # Added VFM_LTSA option
-            dataset = VFM_OHTS_Longitudinal_Survival_Dataset
-            collate_fn = OHTS_collate_fn
         elif args.model == 'SF':
             dataset = OHTS_Longitudinal_Survival_Dataset
             collate_fn = OHTS_collate_fn_sf
-        elif args.model == 'VFM_image':
-            dataset = VFM_OHTS_Survival_Dataset
-            collate_fn = None
-        else:  # 'image'
+        else:
             dataset = OHTS_Survival_Dataset
-            collate_fn = None
-    elif args.dataset == 'SIGF':
-        args.data_dir = '/home/lin01231/public/datasets/SIGF_processed'
-        args.label_dir = '/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/datasets/SIGF_processed'
-        args.n_classes = 15  # Max time_to_event = 14, so need 0-14 = 15 classes
-
-        if args.model == 'LTSA':
-            dataset = SIGF_Longitudinal_Survival_Dataset
-            collate_fn = SIGF_collate_fn
-        elif args.model == 'VFM_LTSA':  # VFM_LTSA option for SIGF
-            dataset = VFM_SIGF_Longitudinal_Survival_Dataset
-            collate_fn = SIGF_collate_fn
-        elif args.model == 'SF':
-            dataset = SIGF_Longitudinal_Survival_Dataset
-            collate_fn = SIGF_collate_fn_sf
-        elif args.model == 'VFM_image':
-            dataset = VFM_SIGF_Survival_Dataset
-            collate_fn = None
-        else:  # 'image'
-            dataset = SIGF_Survival_Dataset
             collate_fn = None
 
     # Create train, val, and test datasets
@@ -308,9 +196,9 @@ def main(args):
     test_dataset  = dataset(data_dir=args.data_dir, label_dir=args.label_dir, split='test', augment=False, tpe_mode=args.tpe_mode, learned_pe=args.learned_pe)
 
     # Create train, val, and test data loaders
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=4, shuffle=True, pin_memory=False, worker_init_fn=worker_init_fn, collate_fn=collate_fn)
-    val_loader   = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, num_workers=4, shuffle=False, pin_memory=True, worker_init_fn=val_worker_init_fn, collate_fn=collate_fn)
-    test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=4, shuffle=False, pin_memory=True, worker_init_fn=val_worker_init_fn, collate_fn=collate_fn)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=2, shuffle=True, pin_memory=False, worker_init_fn=worker_init_fn, collate_fn=collate_fn)
+    val_loader   = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, shuffle=False, pin_memory=True, worker_init_fn=val_worker_init_fn, collate_fn=collate_fn)
+    test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=2, shuffle=False, pin_memory=True, worker_init_fn=val_worker_init_fn, collate_fn=collate_fn)
 
     # Create model
     if args.model == 'SF':
@@ -342,8 +230,6 @@ def main(args):
         train_fn, validate_fn, evaluate_fn = train_LTSA, validate_LTSA, evaluate_LTSA
     else:
         train_fn, validate_fn, evaluate_fn = train, validate, evaluate
-
-
 
     # Train with early stopping
     epoch = 1
@@ -387,8 +273,8 @@ if __name__ == '__main__':
     parser.add_argument('--amp', action='store_true', default=False)
     parser.add_argument('--dropout', type=float, default=0.)
     parser.add_argument('--augment', action='store_true', default=False)
-    parser.add_argument('--arch', type=str, default='resnet18', choices=['resnet18', 'swin_v2_t', 'convnext_t', 'caformer_s36', 'vit_base'], help='Image encoder architecture')
-    parser.add_argument('--model', type=str, default='image', choices=['image', 'LTSA', 'SF', 'VFM_image', 'VFM_LTSA'], help='Model type: Single-image baseline, Longitudinal Transformer, SF, or VFM variants')
+    parser.add_argument('--arch', type=str, default='resnet18', choices=['resnet18', 'swin_v2_t', 'convnext_t', 'caformer_s36'], help='Image encoder architecture')
+    parser.add_argument('--model', type=str, default='image', choices=['image', 'LTSA', 'SF'], help='Single-image baseline vs. Longitudinal Transformer for Survival Analysis (LTSA)')
     parser.add_argument('--n_layers', type=int, default=1)
     parser.add_argument('--n_heads', type=int, default=4)
     parser.add_argument('--attn_map', action='store_true', default=False, help='Whether to return attention maps for LTSA')
@@ -403,22 +289,15 @@ if __name__ == '__main__':
     parser.add_argument('--t_list', type=int, nargs='+', default=[1, 2, 3, 5, 8])
     parser.add_argument('--del_t_list', type=int, nargs='+', default=[1, 2, 5, 8])
     parser.add_argument('--step_ahead', action='store_true', default=False, help='Whether to enable step-ahead feature prediction')
-    parser.add_argument('--dataset', type=str, default='AREDS', choices=['AREDS', 'OHTS', 'SIGF'])
+    parser.add_argument('--dataset', type=str, default='AREDS', choices=['AREDS', 'OHTS'])
     parser.add_argument('--reduce_lr', action='store_true', default=False, help='Whether to apply a "reduce on plataeu" learning rate scheduler')
     parser.add_argument('--reduce_lr_factor', type=float, default=0.5, help='Factor by which to reduce learning rate on plateau')
     parser.add_argument('--reduce_lr_patience', type=int, default=2, help='Patience for learning rate scheduler')
     parser.add_argument('--mean_pool', action='store_true', default=False, help='Use mean pooling instead of [CLS] token')
     parser.add_argument('--use_deformable_spatial', action='store_true', help='Use deformable attention in spatial encoder')
     parser.add_argument('--use_deformable_temporal', action='store_true', help='Use deformable attention for temporal encoder')
-    
-    # VFM-specific arguments (from VisionFM/finetune_visionfm_for_multiclass_classification.py)
-    parser.add_argument('--vfm_checkpoint_path', type=str, default='/home/lin01231/zhan9191/AI4M/SongProj/longitudinal_transformer_for_survival_analysis/pretrained_weights/VFM_Fundus_weights.pth', 
-                        help='Path to VisionFM pretrained weights')
-    parser.add_argument('--vfm_patch_size', type=int, default=16, 
-                        help='Patch size for VFM model (should match pretraining)')
-    parser.add_argument('--vfm_checkpoint_key', type=str, default=None,
-                        help='Key to use when loading the checkpoint (if checkpoint is a dict)')
- 
+
+
     args = parser.parse_args()
 
     print(args)

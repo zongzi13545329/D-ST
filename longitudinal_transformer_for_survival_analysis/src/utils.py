@@ -202,16 +202,6 @@ def train_LTSA(model, device, loss_fn, optimizer, data_loader, history, epoch, m
     print(f'[TRAIN] Mean C-Index: {mean_c_index:.3f}')
     print(f'[TRAIN] Mean Brier: {mean_brier:.3f}')
 
-    # # Sanity check that predicted risks are higher for uncensored cases
-    # idx = np.where(sub_censorships == 0)[0]
-    # uncensored_risks = risks[idx]
-    # censored_risks = risks[~idx]
-    # print('---')
-    # print(f'Predicted risks for disease (uncensored) cases: {uncensored_risks.mean():.3f} +/- {uncensored_risks.std():.3f}')
-    # print(f'Predicted risks for censored cases: {censored_risks.mean():.3f} +/- {censored_risks.std():.3f}')
-    # print('---')
-
-    # Save validation metrics for this epoch
     current_metrics = pd.DataFrame([[epoch, 'train', running_loss / (b + 1)] + c_indices + briers + [mean_c_index, mean_brier]], columns=history.columns)
     current_metrics.to_csv(os.path.join(model_dir, 'history.csv'), mode='a', header=False, index=False)
 
@@ -968,72 +958,3 @@ def evaluate(model, device, loss_fn, data_loader, history, model_dir, weights, a
     f = open(os.path.join(model_dir, f'test_summary.txt'), 'w')
     f.write(summary)
     f.close()
-
-### VFM-RELATED UTILS ###
-# The following functions are adapted from the VisionFM codebase (src/VisionFM/utils.py)
-# to support model loading and data normalization.
-
-def resize_pos_embed(posemb, posemb_new, num_tokens=1, gs_new=()):
-    # Rescale the grid of position embeddings when loading from state_dict.
-    # From VisionFM/utils.py, originally from:
-    # https://github.com/google-research/vision_transformer/blob/00883dd691c63a6830751563748663526e811cee/vit_jax/checkpoint.py#L224
-    import math
-    import logging
-    _logger = logging.getLogger(__name__)
-    _logger.info('Resized position embedding: %s to %s', posemb.shape, posemb_new.shape)
-    ntok_new = posemb_new.shape[1]
-    if num_tokens:
-        posemb_tok, posemb_grid = posemb[:, :num_tokens], posemb[0, num_tokens:]
-        ntok_new -= num_tokens
-    else:
-        posemb_tok, posemb_grid = posemb[:, :0], posemb[0]
-    gs_old = int(math.sqrt(len(posemb_grid)))
-    if not len(gs_new):  # backwards compatibility
-        gs_new = [int(math.sqrt(ntok_new))] * 2
-    assert len(gs_new) >= 2
-    _logger.info('Position embedding grid-size from %s to %s', [gs_old, gs_old], gs_new)
-    posemb_grid = posemb_grid.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
-    posemb_grid = torch.nn.functional.interpolate(posemb_grid, size=gs_new, mode='bicubic', align_corners=False)
-    posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_new[0] * gs_new[1], -1)
-    posemb = torch.cat([posemb_tok, posemb_grid], dim=1)
-    return posemb
-
-def get_stats(modality):
-    # From VisionFM/utils.py - Returns mean and std for different imaging modalities
-    stats = {"MRI": [(0.17368862, 0.17368862, 0.17368862), (0.16198656, 0.16198656, 0.16198656)],
-             "Fundus": [(0.423737496137619, 0.2609460651874542, 0.128403902053833),
-                        (0.29482534527778625, 0.20167365670204163, 0.13668020069599152)],
-             "UBM": [(0.096110865, 0.096110865, 0.096110865), (0.20977867, 0.20977867, 0.20977867)],
-             "Ultrasound": [(0.05989236, 0.05978666, 0.056694973), (0.154277, 0.15504874, 0.14464583)],
-             "External": [(0.4936253, 0.36324808, 0.25956994), (0.32001, 0.27109432, 0.21991591)],
-             "FFA": [(0.2020487, 0.20205145, 0.20201068), (0.17406046, 0.17404206, 0.17401208)],
-             "SlitLamp": [(0.5556667, 0.40288574, 0.38857886), (0.26516676, 0.23311588, 0.23903583)],
-             "OCT": [(0.21091926, 0.21091926, 0.21091919), (0.17598894, 0.17598891, 0.17598893)]}
-    assert modality in stats.keys(), f'unsupported modality: {modality}'
-    return stats[modality]
-
-def load_pretrained_weights(model, pretrained_weights, checkpoint_key=None, model_name=None, patch_size=None):
-    # From VisionFM/utils.py - Loads pretrained weights with position embedding resizing
-    if os.path.isfile(pretrained_weights):
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
-        if checkpoint_key is not None and checkpoint_key in state_dict:
-            print(f"Take key {checkpoint_key} in provided checkpoint dict")
-            state_dict = state_dict[checkpoint_key]
-        # remove `module.` prefix
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        # remove `backbone.` prefix induced by multicrop wrapper
-        state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
-
-        # position embedding
-        if 'pos_embed' in state_dict and hasattr(model, 'pos_embed'):
-            pos_embed_w = state_dict['pos_embed']
-            if pos_embed_w.shape != model.pos_embed.shape:
-                print(f"Will resize the pos_embed from {pos_embed_w.shape} to {model.pos_embed.shape}")
-                pos_embed_w = resize_pos_embed(pos_embed_w, model.pos_embed, getattr(model, 'num_tokens', 1),
-                                            model.patch_embed.grid_size)
-                state_dict['pos_embed'] = pos_embed_w
-
-        msg = model.load_state_dict(state_dict, strict=False)
-        print('Pretrained weights found at {} and loaded with msg: {}'.format(pretrained_weights, msg))
-        return
-    print("There is no reference weights available for this model => We use random weights.")

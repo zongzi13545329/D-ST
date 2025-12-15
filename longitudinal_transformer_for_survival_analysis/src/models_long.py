@@ -4,16 +4,9 @@ import timm
 import torch
 import torchvision
 
-# 使用绝对导入
-import src.models_vfm as models_vfm
-
 def create_model(args):
     if args.model == 'LTSA':
         return LTSA(args)
-    elif args.model == 'VFM_image':
-        return models_vfm.VFMImageSurvivalModel(args)
-    elif args.model == 'VFM_LTSA':
-        return models_vfm.VFM_LTSA(args)
     else:
         return ImageSurvivalModel(args)
 
@@ -212,8 +205,7 @@ class ImageSurvivalModel(torch.nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         
-        hazards = self.classifier(x) #hazards[i] 表示在第i个时间间隔内发生事件的条件概率
-        surv = torch.cumprod(1-hazards, dim=1) #第i个时间间隔后仍然存活（没有发生事件）的概率
-
+        hazards = self.classifier(x)
+        surv = torch.cumprod(1-hazards, dim=1)
         
         return hazards, surv

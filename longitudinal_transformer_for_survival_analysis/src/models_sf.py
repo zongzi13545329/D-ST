@@ -1,9 +1,10 @@
+#return weight version
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
 import os
-sys.path.insert(0, "/home/lin01231/zhan9191/AI4M/SongProj/deformable_detr")
+sys.path.insert(0, "/projects/standard/lin01231/song0760/deformable_detr")
 from transformers import TimesformerModel, TimesformerConfig
 from models.ops.modules.ms_deform_attn import MSDeformAttn
 
@@ -32,8 +33,8 @@ class TransformerImageEncoder(nn.Module):
         
 def create_model(args):
     if args.use_deformable_spatial and args.use_deformable_temporal:
-        encoder = DeformableSpatialEncoder(d_model=768, n_heads=4, n_points=4)
-        temporal_encoder = DeformableTemporalEncoder(d_model=768, n_heads=4, max_len=args.max_seq_len)
+        encoder = DeformableSpatialEncoder(d_model=768, n_heads=4, n_points=10)
+        temporal_encoder = DeformableTemporalEncoder(d_model=768, n_heads=4, n_points=8, max_len=args.max_seq_len)
 
     elif args.use_deformable_spatial and not args.use_deformable_temporal:
         encoder = DeformableSpatialEncoder(d_model=768, n_heads=4, n_points=4)
@@ -91,7 +92,7 @@ class DeformableSpatialEncoder(nn.Module):
         ref_points = torch.stack((grid_x, grid_y), -1).view(-1, 2)
         reference_points = ref_points[None, :, None, :].repeat(B * T, 1, 1, 1)
 
-        out = self.attn(
+        out, _ = self.attn(
             query=feat,
             reference_points=reference_points,
             input_flatten=feat,
@@ -115,7 +116,7 @@ class DeformableTemporalEncoder(nn.Module):
         self.level_start_index = torch.tensor([0], dtype=torch.long)
         self.spatial_shapes = torch.tensor([[max_len, 1]], dtype=torch.long)
 
-    def forward(self, x):
+    def forward(self, x, return_attn=False):
         B, T, D = x.shape
         query = x
         value = x
@@ -124,16 +125,25 @@ class DeformableTemporalEncoder(nn.Module):
         ref_points = torch.stack([ref, torch.zeros_like(ref)], dim=-1).unsqueeze(0).repeat(B, 1, 1)
         reference_points = ref_points.unsqueeze(2)
 
+        attn_weights_all = []
+
         for attn in self.layers:
-            x = attn(
+            x, attn_weight = attn(
                 query=query,
                 reference_points=reference_points,
                 input_flatten=value,
                 input_spatial_shapes=self.spatial_shapes.to(x.device),
                 input_level_start_index=self.level_start_index.to(x.device)
             )
+            if return_attn:
+                attn_weights_all.append(attn_weight)  # shape: [B, Len_q, n_heads, n_points]
 
-        return self.proj(x)
+        x = self.proj(x)
+
+        if return_attn:
+            return x, attn_weights_all[-1]  # 取最后一层的
+        return x
+
 
 class TimeSformerEncoder(nn.Module):
     def __init__(self, pretrained=True, use_cls=True):
@@ -221,8 +231,13 @@ class SF(nn.Module):
         x = self.pos_encoder(embeddings, rel_times)
 
         if self.temporal_encoder:
-            x = self.temporal_encoder(x)
-
+            if getattr(self.args, "attn_map", False):
+                x, attn_weight = self.temporal_encoder(x, return_attn=True)  # [B, T, D], [B, T, n_heads, n_points]
+            else:
+                x = self.temporal_encoder(x)
+                attn_weight = None
+        else:
+            attn_weight = None
         hazards = self.classifier(x)
         surv = torch.cumprod(1 - hazards.view(-1, hazards.shape[-1]), dim=1).view(hazards.shape[0], hazards.shape[1], hazards.shape[2])
 
@@ -237,6 +252,6 @@ class SF(nn.Module):
             delta_encoded_feats = self.rel_pos_encoder(x, delta_times)
             feat_preds = self.step_ahead_predictor(delta_encoded_feats)
             feat_targets = F.pad(x[:, 1:, :], (0, 0, 0, 1), 'constant', 0)
-            return hazards, surv, feat_preds, feat_targets, padding_mask
+            return hazards, surv, feat_preds, feat_targets, padding_mask, attn_weight
 
-        return hazards, surv, padding_mask
+        return hazards, surv, padding_mask, attn_weight
